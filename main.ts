@@ -7,6 +7,7 @@ interface HabiticaTasksSettings {
 	timeOut: number; // in milliseconds
 	apiKey: string; // Habitica API Key
 	rateLimitBuffer: number; // Optional additional buffer for rate limiting
+
 }
 
 type HabiticaTask = {
@@ -71,7 +72,7 @@ const DEVELOPER_USER_ID = 'a8e40d27-c872-493f-acf2-9fe75c56ac0c'
 // Itssa me!
 
 
-type HabiticaResponse = {
+type HabiticaTaskResponse = {
 	success: boolean;
 	data: HabiticaTask[];
 }
@@ -128,6 +129,9 @@ const _coalesceObjectKeyTypes = (objects: Record<string, string>[]): Record<stri
 	return coalesced;
 }
 
+/**
+ * Interfaces with the Habitica API while respecting rate limits.
+ */
 class HabiticaClient {
 	plugin: HabiticaTasksIntegration;
 	remainingRequests: number = 30;
@@ -176,6 +180,14 @@ class HabiticaClient {
 		return fn();
 	}
 
+	async _handleResponse<T>(response: Response): Promise<T> {
+		// Check response headers for rate limiting info
+		this.remainingRequests = parseInt(response.headers.get('x-ratelimit-remaining') || '30');
+		this.nextResetTime = new Date(response.headers.get('x-ratelimit-reset') || '');
+		console.log(`Rate Limit - Remaining: ${this.remainingRequests}, Next Reset Time: ${this.nextResetTime}`);
+		return response.json() as Promise<T>;
+	}
+
 	async retrieveTasks(ctx: HabiticaTaskRequest = {}): Promise<HabiticaTask[]> {
 		// Fetch
 		// Only include keys for non-null/defined parameters
@@ -188,17 +200,9 @@ class HabiticaClient {
 		console.log(`Fetching tasks from Habitica: ${url}`);
 		console.log(`Using headers: ${JSON.stringify(headers)}`);
 		// First retrieve data, then parse response
-		return this.callWhenRateLimitAllows(
-			() => fetch(url, { headers }).then(
-				(response) => {
-					// Check response headers for rate limiting info
-					this.remainingRequests = parseInt(response.headers.get('x-ratelimit-remaining') || '30');
-					this.nextResetTime = new Date(response.headers.get('x-ratelimit-reset') || '');
-					console.log(`Rate Limit - Remaining: ${this.remainingRequests}, Next Reset Time: ${this.nextResetTime}`);
-					return response.json();
-				}
-			)
-		).then((data: HabiticaResponse) => {
+		return this.callWhenRateLimitAllows(() =>
+			fetch(url, { headers }).then(response => this._handleResponse<HabiticaTaskResponse>(response))
+		).then((data: HabiticaTaskResponse) => {
 			if (data.success) {
 				new Notice(`Retrieved ${data.data.length} ${ctx.type} tasks from Habitica.`);
 				return data.data;
@@ -211,6 +215,11 @@ class HabiticaClient {
 	}
 }
 
+/**
+ * Main plugin class for Habitica-Tasks Integration.
+ * 
+ * Handles plugin lifecycle, settings, and UI integration.
+ */
 export default class HabiticaTasksIntegration extends Plugin {
 	settings: HabiticaTasksSettings;
 	client: HabiticaClient;
@@ -220,7 +229,7 @@ export default class HabiticaTasksIntegration extends Plugin {
 		const ribbonIconEl = this.addRibbonIcon('swords', PLUGIN_NAME, async (_evt: MouseEvent) => {
 			// Called when the user clicks the icon.
 			new Notice(`${PLUGIN_NAME} icon clicked. Retrieving tasks...`);
-			const tasks = await this.client.retrieveTasks({ type: 'todos' });
+			const tasks = await this.client.retrieveTasks({ type: 'dailys' });
 			console.log('Retrieved tasks:', tasks);
 			// print `task: <typeof task>` for each task
 			if (tasks.length > 0) {
