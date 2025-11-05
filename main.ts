@@ -1,133 +1,22 @@
 import type { App } from 'obsidian';
 import { Notice, Plugin, PluginSettingTab, Setting, MarkdownView } from 'obsidian';
-
-
-interface HabiticaTasksSettings {
-	userId: string; // Habitica User ID
-	timeOut: number; // in milliseconds
-	apiKey: string; // Habitica API Key
-	rateLimitBuffer: number; // Optional additional buffer for rate limiting
-
-}
-
-type HabiticaTask = {
-	attribute: string
-	byHabitica: boolean
-	challenge: {
-		id?: string
-		shortName?: string
-		taskId?: string
-	}
-	checklist?: object
-	collapseChecklist?: boolean
-	completed?: boolean
-	counterDown?: number
-	counterUp?: number
-	createdAt: string
-	date?: any
-	daysOfMonth?: object
-	down?: boolean
-	everyX?: number
-	frequency?: string
-	group: {
-		approval?: object
-		assignedUsers: object
-		completedBy?: object
-		sharedCompletion?: string
-	}
-	history?: object
-	id: string
-	isDue?: boolean
-	nextDue?: object
-	notes: string
-	priority: number
-	reminders: object
-	repeat?: object
-	startDate?: string
-	steak?: number
-	tags: string[]
-	text: string
-	type: string
-	up?: boolean
-	updatedAt: string
-	userId: string
-	value: number
-	weeksOfMonth?: object
-	yesterDaily?: boolean
-	_id: string
-}
+import type { HabiticaTasksSettings, HabiticaTaskRequest, HabiticaTask, HabiticaResponse, HabiticaTaskMap } from './types';
+import { organizeHabiticaTasksByType } from './util';
 
 
 const DEFAULT_SETTINGS: HabiticaTasksSettings = {
 	userId: '',
 	timeOut: 30000,
 	apiKey: '',
-	rateLimitBuffer: 10000 // 10 second buffer
+	rateLimitBuffer: 10000, // 10 second buffer
+	habiticaFolderPath: 'HabiticaTasks'
 }
 
 const HABITICA_SIDE_PLUGIN_ID = 'habitica-x-obsidian-task-integration';
 const PLUGIN_NAME = 'Habitica-Tasks Integration';
 const HABITICA_API_URL = 'https://habitica.com/api';
-const DEVELOPER_USER_ID = 'a8e40d27-c872-493f-acf2-9fe75c56ac0c'
-// Itssa me!
+const DEVELOPER_USER_ID = 'a8e40d27-c872-493f-acf2-9fe75c56ac0c'  // Itssa me, GammaThought!
 
-
-type HabiticaTaskResponse = {
-	success: boolean;
-	data: HabiticaTask[];
-}
-type TaskType = 'habits' | 'dailys' | 'todos' | 'rewards' | 'completedTodos'
-
-
-interface HabiticaTaskRequest {
-	type?: TaskType;
-	dueDate?: Date;
-}
-
-// Utility function for debugging: reveals the API structure for logging the types of keys in the response objects
-/**
- * Reveals the types of keys in an object.
- * @param obj The object to analyze.
- * @returns A record mapping keys to their types.
- */
-const _revealObjectKeyTypes = (obj: object): Record<string, string> => {
-	const keyTypes: Record<string, string> = {};
-	for (const [key, value] of Object.entries(obj)) {
-		keyTypes[key] = typeof value;
-	}
-	return keyTypes;
-}
-
-/**
- * Coalesces the key types from multiple objects.
- * If a key has different types across objects, it is marked as 'any'.
- * If a key is not present in all objects, it is marked as optional (i.e., type | undefined).
- * @param objects An array of records mapping keys to their types.
- * @returns A record mapping keys to their coalesced types.
- */
-const _coalesceObjectKeyTypes = (objects: Record<string, string>[]): Record<string, string> => {
-	const coalesced: Record<string, string> = {};
-	const keyCounts: Record<string, number> = {};
-	for (const obj of objects) {
-		for (const [key, type] of Object.entries(obj)) {
-			keyCounts[key] = (keyCounts[key] || 0) + 1;
-			if (coalesced[key]) {
-				if (coalesced[key] !== type) {
-					coalesced[key] = 'any';
-				}
-			} else {
-				coalesced[key] = type;
-			}
-		}
-	}
-	// Mark keys that are not present in all objects as optional (i.e., type | undefined)
-	for (const key of Object.keys(coalesced)) {
-		if (keyCounts[key] < objects.length) {
-			coalesced[key] = `${coalesced[key]} | undefined`;
-		}
-	}
-	return coalesced;
-}
 
 /**
  * Interfaces with the Habitica API while respecting rate limits.
@@ -146,6 +35,13 @@ class HabiticaClient {
 		return this.plugin.settings;
 	}
 
+	/**
+	 * Serves as a local router for building Habitica API URLs.
+	 * @param endpoint The API endpoint to access.
+	 * @param version The API version to use.
+	 * @param queryParams The query parameters to include in the URL.
+	 * @returns The constructed API URL.
+	 */
 	buildApiUrl(endpoint: string, version: number = 3, queryParams: Record<string, string> = {}): string {
 		const queryString = new URLSearchParams(queryParams).toString();
 		return `${HABITICA_API_URL}/v${version}/${endpoint}?${queryString}`;
@@ -158,7 +54,20 @@ class HabiticaClient {
 			'x-api-key': `${this.settings().apiKey}`
 		};
 	}
+	_defaultJSONHeaders() {
+		return {
+			...this._defaultHeaders(),
+			'Content-Type': 'application/json'
+		};
+	}
 
+	/**
+	 * Calls the provided function when the rate limit allows it.
+	 * If there are remaining requests, it calls the function immediately.
+	 * If there are no remaining requests, it waits until the next reset time plus a buffer before calling the function.
+	 * @param fn The function to call when the rate limit allows it.
+	 * @returns A promise that resolves to the result of the function.
+	 */
 	async callWhenRateLimitAllows<T>(fn: () => Promise<T>): Promise<T> {
 		// If we have remaining requests, call the function immediately
 		if (this.remainingRequests > 0) {
@@ -169,25 +78,42 @@ class HabiticaClient {
 		if (this.nextResetTime && this.nextResetTime > new Date()) {
 			console.log(`callWhenRateLimitAllows: No remaining requests, waiting until reset time at ${this.nextResetTime.toISOString()} (${this.nextResetTime}).`);
 			const waitTime = this.nextResetTime.getTime() - new Date().getTime();
-			return new Promise((resolve) => {
+			return new Promise<T>((resolve) => {
 				setTimeout(() => {
-					resolve(fn());
+					// Recursively call this function after waiting to ensure rate limit is respected
+					this.callWhenRateLimitAllows(fn).then(resolve);
 				}, waitTime + this.settings().rateLimitBuffer);
 			});
 		}
 		console.log("!!! callWhenRateLimitAllows: No reset time available, calling function immediately.");
-		// If we don't have a reset time, just call the function (shouldn't happen)
+		// If we don't have a reset time, just call the function (shouldn't happen, except maybe on first call)
 		return fn();
 	}
 
-	async _handleResponse<T>(response: Response): Promise<T> {
+	async _handleResponse(response: Response): Promise<HabiticaResponse> {
 		// Check response headers for rate limiting info
 		this.remainingRequests = parseInt(response.headers.get('x-ratelimit-remaining') || '30');
 		this.nextResetTime = new Date(response.headers.get('x-ratelimit-reset') || '');
 		console.log(`Rate Limit - Remaining: ${this.remainingRequests}, Next Reset Time: ${this.nextResetTime}`);
-		return response.json() as Promise<T>;
+		// Check if response is ok & successful
+		if (!response.ok) {
+			throw new Error(`HTTP error (Is Habitica API down?); status: ${response.status}, statusText: ${response.statusText}`);
+		}
+		// Sneak peek at the response JSON
+		const data = await response.json() as HabiticaResponse;
+		if (!data.success) {
+			throw new Error(`Habitica API error (Was there a Habitica API update?); response: ${JSON.stringify(data)}`);
+		}
+		return data;
 	}
 
+	/**
+	 * Retrieves tasks from Habitica API based on the provided context.
+	 * If no context is provided, retrieves all tasks.
+	 * If the request fails, notifies the user and returns an empty array.
+	 * @param ctx The context for retrieving tasks, including type and due date.
+	 * @returns A promise that resolves to an array of HabiticaTask objects.
+	 */
 	async retrieveTasks(ctx: HabiticaTaskRequest = {}): Promise<HabiticaTask[]> {
 		// Fetch
 		// Only include keys for non-null/defined parameters
@@ -196,21 +122,39 @@ class HabiticaClient {
 			...(ctx.dueDate ? { dueDate: ctx.dueDate.toISOString() } : {})
 		};
 		const url = this.buildApiUrl('tasks/user', 3, queryParams);
-		const headers = this._defaultHeaders();
+		const headers = this._defaultJSONHeaders();
 		console.log(`Fetching tasks from Habitica: ${url}`);
 		console.log(`Using headers: ${JSON.stringify(headers)}`);
 		// First retrieve data, then parse response
 		return this.callWhenRateLimitAllows(() =>
-			fetch(url, { headers }).then(response => this._handleResponse<HabiticaTaskResponse>(response))
-		).then((data: HabiticaTaskResponse) => {
-			if (data.success) {
-				new Notice(`Retrieved ${data.data.length} ${ctx.type} tasks from Habitica.`);
-				return data.data;
-			} else {
-				new Notice(`Failed to retrieve tasks from Habitica.`);
-				new Notice(`Response: ${JSON.stringify(data)}`);
-				return [];
-			}
+			fetch(url, { headers }).then(response => this._handleResponse(response))
+		).then((data: HabiticaResponse) => {
+			// Presume failure is caught by _handleResponse
+			return data.data as HabiticaTask[];
+		});
+	}
+
+	/**
+	 * Utility method to retrieve all tasks organized by type.
+	 * @returns A promise that resolves to a map of tasks organized by type.
+	 */
+	async retrieveAllTasks(): Promise<HabiticaTaskMap> {
+		// Retrieve all tasks of all types
+		const tasks = await this.retrieveTasks();
+		return organizeHabiticaTasksByType(tasks);
+	}
+
+	async createTask(task: Partial<HabiticaTask>): Promise<HabiticaTask | null> {
+		// Create a new task in Habitica
+		const url = this.buildApiUrl('tasks/user', 3);
+		const headers = this._defaultJSONHeaders();
+		console.log(`Creating task in Habitica: ${url}`);
+		return this.callWhenRateLimitAllows(() =>
+			fetch(url, { method: 'POST', headers, body: JSON.stringify(task) })
+				.then(response => this._handleResponse(response))
+		).then((data: HabiticaResponse) => {
+			// Presume failure is caught by _handleResponse
+			return data.data as HabiticaTask;
 		});
 	}
 }
@@ -229,21 +173,33 @@ export default class HabiticaTasksIntegration extends Plugin {
 		const ribbonIconEl = this.addRibbonIcon('swords', PLUGIN_NAME, async (_evt: MouseEvent) => {
 			// Called when the user clicks the icon.
 			new Notice(`${PLUGIN_NAME} icon clicked. Retrieving tasks...`);
-			const tasks = await this.client.retrieveTasks({ type: 'dailys' });
-			console.log('Retrieved tasks:', tasks);
-			// print `task: <typeof task>` for each task
-			if (tasks.length > 0) {
-				new Notice(`Retrieved ${tasks.length} tasks from Habitica.`);
-				// Print all task text and tags to console
-				// tasks.forEach((task) => {
-				// 	console.log(`Task: ${task.text}, Tags: ${task.tags}, Type: ${task.type}`);
-				// });
-			} else {
-				new Notice('No tasks retrieved from Habitica.');
-			}
+			this.client.retrieveAllTasks().then(
+				(taskMap: HabiticaTaskMap) => {
+					console.log('Retrieved all tasks organized by type:', taskMap);
+					const folderPath = this.getOrCreateHabiticaFolder();
+					console.log('Folder path:', folderPath);
+					// Process the taskMap as needed
+					new Notice(`Retrieved tasks organized by type. Check console for details.`);
+				}
+			).catch(async (error) => {
+				console.error('Error retrieving tasks from Habitica:', error);
+				new Notice(`Error retrieving tasks from Habitica: ${error.message}`);
+			});
 		});
 		// Perform additional things with the ribbon
 		ribbonIconEl.addClass('habitica-task-btn');
+	}
+
+	getOrCreateHabiticaFolder() {
+		const folderPath = this.settings.habiticaFolderPath;
+		let folder = this.app.vault.getAbstractFileByPath(folderPath);
+
+		if (!folder) {
+			// If the folder doesn't exist, create it
+			this.app.vault.createFolder(folderPath);
+		}
+
+		return folderPath;
 	}
 
 	attachCommands() {
@@ -344,6 +300,7 @@ export default class HabiticaTasksIntegration extends Plugin {
 
 	async saveSettings() {
 		await this.saveData(this.settings);
+		this.getOrCreateHabiticaFolder();
 	}
 }
 
@@ -403,12 +360,23 @@ class SampleSettingTab extends PluginSettingTab {
 				.setValue(this.plugin.settings.rateLimitBuffer.toString())
 				.onChange(async (value) => {
 					const intValue = parseInt(value);
-					if (!isNaN(intValue) && intValue >= 0) {
+					if (!isNaN(intValue) && intValue >= 1000) {
 						this.plugin.settings.rateLimitBuffer = intValue;
 						await this.plugin.saveSettings();
 					} else {
-						new Notice('Please enter a valid number greater than or equal to 0.');
+						new Notice('Please enter a valid number greater than or equal to 1000.');
 					}
 				}));
+		new Setting(containerEl)
+			.setName('Habitica Folder Path')
+			.setDesc('Enter the folder path where Habitica tasks will be stored')
+			.addText(text => text
+				.setPlaceholder('Enter folder path')
+				.setValue(this.plugin.settings.habiticaFolderPath)
+				.onChange(async (value) => {
+					this.plugin.settings.habiticaFolderPath = value;
+					await this.plugin.saveSettings();
+				}));
+
 	}
 }
