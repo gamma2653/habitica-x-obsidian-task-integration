@@ -73,13 +73,10 @@ export type HabiticaTaskMap = {
 }
 export const ExcludedTaskTypes: Set<TaskType> = new Set(['completedTodos', 'rewards']);
 
-
-
 export type HabiticaResponse = {
 	success: boolean;
 	data: HabiticaTask[] | HabiticaTask;
 }
-
 
 export interface HabiticaTaskRequest {
 	type?: TaskType;

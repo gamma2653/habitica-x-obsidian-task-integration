@@ -1,7 +1,7 @@
 import type { App } from 'obsidian';
 import { Notice, Editor, Plugin, PluginSettingTab, Setting, MarkdownView, TFolder } from 'obsidian';
 import type { HabiticaTasksSettings, HabiticaTaskRequest, HabiticaTask, HabiticaResponse, HabiticaTaskMap, TaskType } from './types';
-import { ExcludedTaskTypes } from './types';
+import { ExcludedTaskTypes, TaskTypes } from './types';
 import { organizeHabiticaTasksByType, taskToNoteLines } from './util';
 
 
@@ -95,8 +95,8 @@ class HabiticaClient {
 	async _handleResponse(response: Response): Promise<HabiticaResponse> {
 		// Check response headers for rate limiting info
 		console.log(`this: `, this);
-		this.remainingRequests = parseInt(response.headers.get('x-ratelimit-remaining') || '30');
-		this.nextResetTime = new Date(response.headers.get('x-ratelimit-reset') || '');
+		this.remainingRequests = parseInt(response.headers.get('x-ratelimit-remaining') || this.remainingRequests?.toString() || '30');
+		this.nextResetTime = new Date(response.headers.get('x-ratelimit-reset') || this.nextResetTime?.toISOString() || new Date().toISOString());
 		console.log(`Rate Limit - Remaining: ${this.remainingRequests}, Next Reset Time: ${this.nextResetTime}`);
 		// Check if response is ok & successful
 		if (!response.ok) {
@@ -241,6 +241,30 @@ export default class HabiticaTasksIntegration extends Plugin {
 			this.app.vault.createFolder(folderPath);
 		}
 		return folderPath;
+	}
+
+	getHabiticaFiles() {
+		const folderPath = this.getOrCreateHabiticaFolder();
+		const habiticaFiles: Record<TaskType, string> = {} as Record<TaskType, string>;
+		for (const type of Object.values(TaskTypes)) {
+			if (ExcludedTaskTypes.has(type)) {
+				continue;
+			}
+			habiticaFiles[type] = `${folderPath}/${type}.md`;
+		}
+		return habiticaFiles;
+	}
+
+	async pushChangesToHabitica() {
+		// Implementation for pushing changes to Habitica
+		const habiticaFiles = this.getHabiticaFiles();
+		for (const [type, filePath] of Object.entries(habiticaFiles)) {
+			const file = this.app.vault.getFileByPath(filePath);
+			if (file) {
+				const content = await this.app.vault.read(file);
+				// Push content to Habitica
+			}
+		}
 	}
 
 	attachCommands() {

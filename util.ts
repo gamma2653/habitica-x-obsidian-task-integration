@@ -1,4 +1,4 @@
-import type { HabiticaTask, HabiticaTaskMap, TaskType, HabiticaTasksSettings as HabiticaTaskSettings } from './types';
+import type { HabiticaTask, HabiticaTaskMap, HabiticaTasksSettings as HabiticaTaskSettings } from './types';
 
 /**
  * Utility function for debugging.
@@ -55,17 +55,10 @@ export const organizeHabiticaTasksByType = (tasks: HabiticaTask[]): HabiticaTask
     };
 
     for (const task of tasks) {
-        const typeMap: Record<string, TaskType> = {
-            habit: 'habits',
-            daily: 'dailys',
-            todo: 'todos',
-            reward: 'rewards'
-        };
-        const typeKey = typeMap[task.type];
-        if (typeKey) {
-            taskMap[typeKey].push(task);
+        if (task.type in taskMap) {
+            taskMap[task.type].push(task);
         } else {
-            console.warn(`Unknown task type: ${task.type}`);
+            console.warn(`Unknown task type encountered: ${task.type}`);
         }
     }
     return taskMap;
