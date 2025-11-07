@@ -1,7 +1,8 @@
 import type { App } from 'obsidian';
-import { Notice, Plugin, PluginSettingTab, Setting, MarkdownView } from 'obsidian';
-import type { HabiticaTasksSettings, HabiticaTaskRequest, HabiticaTask, HabiticaResponse, HabiticaTaskMap } from './types';
-import { organizeHabiticaTasksByType } from './util';
+import { Notice, Editor, Plugin, PluginSettingTab, Setting, MarkdownView, TFolder } from 'obsidian';
+import type { HabiticaTasksSettings, HabiticaTaskRequest, HabiticaTask, HabiticaResponse, HabiticaTaskMap, TaskType } from './types';
+import { ExcludedTaskTypes } from './types';
+import { organizeHabiticaTasksByType, taskToNoteLines } from './util';
 
 
 const DEFAULT_SETTINGS: HabiticaTasksSettings = {
@@ -9,7 +10,8 @@ const DEFAULT_SETTINGS: HabiticaTasksSettings = {
 	timeOut: 30000,
 	apiKey: '',
 	rateLimitBuffer: 10000, // 10 second buffer
-	habiticaFolderPath: 'HabiticaTasks'
+	habiticaFolderPath: 'HabiticaTasks',
+	indentString: '    '
 }
 
 const HABITICA_SIDE_PLUGIN_ID = 'habitica-x-obsidian-task-integration';
@@ -72,7 +74,7 @@ class HabiticaClient {
 		// If we have remaining requests, call the function immediately
 		if (this.remainingRequests > 0) {
 			console.log("callWhenRateLimitAllows: Remaining requests available, calling function immediately.");
-			return fn().then(this._handleResponse);
+			return fn().then(this._handleResponse.bind(this));
 		}
 		// If we don't have remaining requests, wait until the reset time and resolve then.
 		if (this.nextResetTime && this.nextResetTime > new Date()) {
@@ -87,11 +89,12 @@ class HabiticaClient {
 		}
 		console.log("!!! callWhenRateLimitAllows: No reset time available, calling function immediately.");
 		// If we don't have a reset time, just call the function (shouldn't happen, except maybe on first call)
-		return fn().then(this._handleResponse);
+		return fn().then(this._handleResponse.bind(this));
 	}
 
 	async _handleResponse(response: Response): Promise<HabiticaResponse> {
 		// Check response headers for rate limiting info
+		console.log(`this: `, this);
 		this.remainingRequests = parseInt(response.headers.get('x-ratelimit-remaining') || '30');
 		this.nextResetTime = new Date(response.headers.get('x-ratelimit-reset') || '');
 		console.log(`Rate Limit - Remaining: ${this.remainingRequests}, Next Reset Time: ${this.nextResetTime}`);
@@ -124,10 +127,10 @@ class HabiticaClient {
 		const url = this.buildApiUrl('tasks/user', 3, queryParams);
 		const headers = this._defaultJSONHeaders();
 		console.log(`Fetching tasks from Habitica: ${url}`);
-		console.log(`Using headers: ${JSON.stringify(headers)}`);
+
 		// First retrieve data, then parse response
 		return this.callWhenRateLimitAllows(() =>
-			fetch(url, { headers })
+			fetch(url, { method: 'GET', headers })
 		).then((data: HabiticaResponse) => {
 			// Presume failure is caught by _handleResponse
 			return data.data as HabiticaTask[];
@@ -144,18 +147,19 @@ class HabiticaClient {
 		return organizeHabiticaTasksByType(tasks);
 	}
 
-	async createTask(task: Partial<HabiticaTask>): Promise<HabiticaTask | null> {
-		// Create a new task in Habitica
-		const url = this.buildApiUrl('tasks/user', 3);
-		const headers = this._defaultJSONHeaders();
-		console.log(`Creating task in Habitica: ${url}`);
-		return this.callWhenRateLimitAllows(() =>
-			fetch(url, { method: 'POST', headers, body: JSON.stringify(task) })
-		).then((data: HabiticaResponse) => {
-			// Presume failure is caught by _handleResponse
-			return data.data as HabiticaTask;
-		});
-	}
+	// async createTask(task: Partial<HabiticaTask>): Promise<HabiticaTask | null> {
+	// 	// Create a new task in Habitica
+	// 	const url = this.buildApiUrl('tasks/user', 3);
+	// 	const headers = this._defaultJSONHeaders();
+	// 	console.log(`Creating task in Habitica: ${url}`);
+
+	// 	return this.callWhenRateLimitAllows(() =>
+	// 		fetch(url, { method: 'POST', headers, body: JSON.stringify(task) })
+	// 	).then((data: HabiticaResponse) => {
+	// 		// Presume failure is caught by _handleResponse
+	// 		return data.data as HabiticaTask;
+	// 	});
+	// }
 }
 
 /**
@@ -166,6 +170,9 @@ class HabiticaClient {
 export default class HabiticaTasksIntegration extends Plugin {
 	settings: HabiticaTasksSettings;
 	client: HabiticaClient;
+	functioning: boolean = true;
+	nonFunctionalReason: string = '';
+
 
 	attachRibbonButton() {
 		// This creates an icon in the left ribbon.
@@ -173,12 +180,13 @@ export default class HabiticaTasksIntegration extends Plugin {
 			// Called when the user clicks the icon.
 			new Notice(`${PLUGIN_NAME} icon clicked. Retrieving tasks...`);
 			this.client.retrieveAllTasks().then(
-				(taskMap: HabiticaTaskMap) => {
+				async (taskMap: HabiticaTaskMap) => {
 					console.log('Retrieved all tasks organized by type:', taskMap);
 					const folderPath = this.getOrCreateHabiticaFolder();
+					await this.createHabiticaNotes();
 					console.log('Folder path:', folderPath);
 					// Process the taskMap as needed
-					new Notice(`Retrieved tasks organized by type. Check console for details.`);
+					new Notice(`Retrieved tasks organized by type. Check ${folderPath} for files.`);
 				}
 			).catch(async (error) => {
 				console.error('Error retrieving tasks from Habitica:', error);
@@ -189,15 +197,49 @@ export default class HabiticaTasksIntegration extends Plugin {
 		ribbonIconEl.addClass('habitica-task-btn');
 	}
 
+	runOrNotify<T extends (...args: any[]) => any>(fn: T): T {  // Actually fair use of 'any' here
+		const plugin = this;
+		return function(this: any, ...args: Parameters<T>): ReturnType<T> | void {
+			if (!plugin.functioning) {
+				console.warn(`Plugin is not functioning: ${plugin.nonFunctionalReason}`);
+				new Notice(`${PLUGIN_NAME} is not functioning properly. Please check the console for errors.`);
+				return;
+			}
+			return fn.apply(this, args);
+		} as T;
+	}
+
+	async createHabiticaNotes() {
+		const folderPath = this.getOrCreateHabiticaFolder();
+		// Create files
+		const habiticaTasks = await this.client.retrieveAllTasks();
+		for (const [type, tasks] of Object.entries(habiticaTasks)) {
+			// Skip ignored types
+			if (tasks.length === 0 || ExcludedTaskTypes.has(type as TaskType)) {  // Surprised TypeScript allows this cast
+				continue;
+			}
+			const fileName = `${type}.md`;
+			const filePath = `${folderPath}/${fileName}`;
+			const file = this.app.vault.getFileByPath(filePath);
+			if (!file) {
+				await this.app.vault.create(filePath, tasks.map(task => taskToNoteLines(task, this.settings)).join('\n\n---\n\n'));
+			} else {
+				await this.app.vault.modify(file, tasks.map(task => taskToNoteLines(task, this.settings)).join('\n\n---\n\n'));
+			}
+		}
+	}
+
 	getOrCreateHabiticaFolder() {
 		const folderPath = this.settings.habiticaFolderPath;
 		let folder = this.app.vault.getAbstractFileByPath(folderPath);
-
+		if (folder && !(folder instanceof TFolder)) {
+			// If the path exists but is not a folder, throw an error
+			throw new Error(`Path ${folderPath} exists but is not a folder. Please remove or rename the file to restore functionality of this plugin.`);
+		}
 		if (!folder) {
 			// If the folder doesn't exist, create it
 			this.app.vault.createFolder(folderPath);
 		}
-
 		return folderPath;
 	}
 
@@ -206,24 +248,24 @@ export default class HabiticaTasksIntegration extends Plugin {
 		this.addCommand({
 			id: 'open-sample-modal-simple',
 			name: 'Open sample modal (simple)',
-			callback: () => {
+			callback: this.runOrNotify(() => {
 				// new SampleModal(this.app).open();
-			}
+			})
 		});
 		// This adds an editor command that can perform some operation on the current editor instance
-		// this.addCommand({
-		// 	id: 'sample-editor-command',
-		// 	name: 'Sample editor command',
-		// 	editorCallback: (editor: Editor, _view: MarkdownView) => {
-		// 		console.log(editor.getSelection());
-		// 		editor.replaceSelection('Sample Editor Command');
-		// 	}
-		// });
+		this.addCommand({
+			id: 'sample-editor-command',
+			name: 'Sample editor command',
+			editorCallback: this.runOrNotify((editor: Editor, _view: MarkdownView) => {
+				console.log(editor.getSelection());
+				editor.replaceSelection('Sample Editor Command');
+			})
+		});
 		// This adds a complex command that can check whether the current state of the app allows execution of the command
 		this.addCommand({
 			id: 'open-sample-modal-complex',
 			name: 'Open sample modal (complex)',
-			checkCallback: (checking: boolean) => {
+			checkCallback: this.runOrNotify((checking: boolean) => {
 				// Conditions to check
 				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
 				if (markdownView) {
@@ -236,7 +278,7 @@ export default class HabiticaTasksIntegration extends Plugin {
 					// This command will only show up in Command Palette when the check function returns true
 					return true;
 				}
-			}
+			})
 		});
 	}
 
@@ -255,7 +297,7 @@ export default class HabiticaTasksIntegration extends Plugin {
 	 */
 	registerInternals() {
 		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
+		this.addSettingTab(new HabiticaTasksSettingTab(this.app, this));
 
 		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
 		// Using this function will automatically remove the event listener when this plugin is disabled.
@@ -303,7 +345,7 @@ export default class HabiticaTasksIntegration extends Plugin {
 	}
 }
 
-class SampleSettingTab extends PluginSettingTab {
+class HabiticaTasksSettingTab extends PluginSettingTab {
 	plugin: HabiticaTasksIntegration;
 
 	constructor(app: App, plugin: HabiticaTasksIntegration) {
@@ -374,6 +416,17 @@ class SampleSettingTab extends PluginSettingTab {
 				.setValue(this.plugin.settings.habiticaFolderPath)
 				.onChange(async (value) => {
 					this.plugin.settings.habiticaFolderPath = value;
+					await this.plugin.saveSettings();
+				}));
+		new Setting(containerEl)
+			.setName('Global Task Tag')
+			.setDesc('Enter a global tag to be added to all Habitica tasks (optional)\nIf using Obsidian Tasks plugin, this should match the "Global task filter" setting.')
+			.addText(text => text
+				.setPlaceholder('Enter global task tag')
+				.setValue(this.plugin.settings.globalTaskTag || '')
+				.onChange(async (value) => {
+					value = value.trim();
+					this.plugin.settings.globalTaskTag = (value === '' ? undefined : value);
 					await this.plugin.saveSettings();
 				}));
 

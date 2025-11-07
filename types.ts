@@ -5,6 +5,8 @@ export interface HabiticaTasksSettings {
 	apiKey: string; // Habitica API Key
 	rateLimitBuffer: number; // Optional additional buffer for rate limiting
 	habiticaFolderPath: string; // Optional folder path for Habitica tasks
+	globalTaskTag?: string; // Optional global tag for all Habitica tasks
+	indentString: string
 }
 
 export type HabiticaTask = {
@@ -15,7 +17,11 @@ export type HabiticaTask = {
 		shortName?: string
 		taskId?: string
 	}
-	checklist?: object
+	checklist?: {
+		completed: boolean
+		id: string
+		text: string
+	}
 	collapseChecklist?: boolean
 	completed?: boolean
 	counterDown?: number
@@ -35,7 +41,7 @@ export type HabiticaTask = {
 	history?: object
 	id: string
 	isDue?: boolean
-	nextDue?: object
+	nextDue?: string[]
 	notes: string
 	priority: number
 	reminders: object
@@ -44,7 +50,7 @@ export type HabiticaTask = {
 	steak?: number
 	tags: string[]
 	text: string
-	type: string
+	type: TaskType
 	up?: boolean
 	updatedAt: string
 	userId: string
@@ -65,12 +71,13 @@ export type TaskType = typeof TaskTypes[keyof typeof TaskTypes];
 export type HabiticaTaskMap = {
 	[key in TaskType]: HabiticaTask[];
 }
+export const ExcludedTaskTypes: Set<TaskType> = new Set(['completedTodos', 'rewards']);
 
 
 
 export type HabiticaResponse = {
 	success: boolean;
-	data: HabiticaTask[] | HabiticaTask | any;
+	data: HabiticaTask[] | HabiticaTask;
 }
 
 
