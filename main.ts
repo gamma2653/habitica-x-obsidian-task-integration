@@ -95,7 +95,7 @@ export default class HabiticaResyncPlugin extends Plugin {
 	async retrieveHabiticaNotes() {
 		const folderPath = this.getOrCreateHabiticaFolder();
 		// Create files
-		const habiticaTasks = await this.client.retrieveAllTasks();
+		const habiticaTasks = await this.client.performWhileAllUnsubscribed('noteSync', this.client.retrieveAllTasks());
 		for (const [type_, tasks] of Object.entries(habiticaTasks)) {
 			// Skip ignored types
 			if (tasks.length === 0 || types.EXCLUDED_TASK_TYPES.has(type_ as types.TaskType)) {  // Surprised TypeScript allows this cast

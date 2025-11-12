@@ -20,7 +20,9 @@ export const HabitView = () => {
             <h2>Habits View</h2>
             <ul>
                 {tasks.map(task => (
-                    <li key={task.id}>{task.text}</li>
+                    <li key={task.id}><span style={{
+                        display: 'inline'
+                    }}><input type="checkbox" checked={task.completed} id={task.id} /> <label htmlFor={task.id}>{task.text}</label></span></li>
                 ))}
             </ul>
         </div>

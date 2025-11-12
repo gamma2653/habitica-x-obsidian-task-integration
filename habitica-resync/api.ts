@@ -13,7 +13,7 @@ export class HabiticaClient implements types.HabiticaAPI {
     plugin: HabiticaResyncPlugin | null = null;
     remainingRequests: number = 30;
     nextResetTime: Date | null = null;
-    eventListeners: Record<types.HabiticaApiEvent, Record<types.SubscriberID, Set<(tasks: types.HabiticaTask[]) => void>>> = {
+    eventListeners = {
         todoUpdated: util.newSubscriberEntry(),
         dailyUpdated: util.newSubscriberEntry(),
         habitUpdated: util.newSubscriberEntry(),
@@ -56,21 +56,20 @@ export class HabiticaClient implements types.HabiticaAPI {
 
     emit(event: types.HabiticaApiEvent, tasks: types.HabiticaTask[]): void {
         // Emit Habitica API events
-        for (const subscriber_id of types.SUBSCRIBER_IDs) {
-            for (const listener of this.eventListeners[event][subscriber_id]) {
+        types.SUBSCRIBER_IDs.forEach((subscriber_id) => {
+            this.eventListeners[event][subscriber_id].forEach((listener) => {
                 listener(tasks);
-            }
-        }
+            });
+        });
     }
 
     _emitNonHomogeneous(tasks: types.HabiticaTask[]): void {
-        const updated_task_types = new Set(tasks.map(t => t.type));
-        for (const updated_type of updated_task_types) {
+        new Set(tasks.map(t => t.type)).forEach((updated_type) => {
             const potentialEvent = `${updated_type}Updated`;
             if (potentialEvent in this.eventListeners) {
                 this.emit(potentialEvent as types.HabiticaApiEvent, tasks.filter(t => t.type === updated_type));
             }
-        }
+        });
     }
 
 
@@ -82,15 +81,27 @@ export class HabiticaClient implements types.HabiticaAPI {
      * @param subscriber_id The subscriber ID to unsubscribe.
      * @param fn The function to execute while unsubscribed.
      */
-    async performWhileUnsubscribed(event: types.HabiticaApiEvent, subscriber_id: types.SubscriberID, fn: () => Promise<void>): Promise<void> {
+    async performWhileUnsubscribed<T>(event: types.HabiticaApiEvent, subscriber_id: types.SubscriberID, awaitable: Promise<T>): Promise<T> {
+        // util.log(`event: ${event}, subscriber_id: ${subscriber_id} - Performing while unsubscribed.`);
         const listeners = this.eventListeners[event][subscriber_id];
-        for (const listener of listeners) {
+        listeners.forEach((listener) => {
             this.unsubscribe(event, subscriber_id, listener);
-        }
-        await fn();
-        for (const listener of listeners) {
+        });
+        const result = await awaitable;
+        listeners.forEach((listener) => {
             this.subscribe(event, subscriber_id, listener);
-        }
+        });
+        return result;
+    }
+
+    async performWhileAllUnsubscribed<T>(subscriber_id: types.SubscriberID, awaitable: Promise<T>): Promise<T> {
+        let result = awaitable;
+
+        // Wrap promise w/ performWhileUnsubscribed for all events
+        types.HABITICA_API_EVENTS.forEach((event) => {
+            result = this.performWhileUnsubscribed(event, subscriber_id, result);
+        });
+        return result;
     }
 
     /**
@@ -123,15 +134,15 @@ export class HabiticaClient implements types.HabiticaAPI {
      * Calls the provided function when the rate limit allows it.
      * If there are remaining requests, it calls the function immediately.
      * If there are no remaining requests, it waits until the next reset time plus a buffer before calling the function.
-     * @param fn The function to call when the rate limit allows it. This function should return a promise that resolves to a Response.
+     * @param awaitable The function to call when the rate limit allows it. This function should return a promise that resolves to a Response.
      * @returns A promise that resolves to the result of the function.
      * @throws An error if the function call fails.
      */
-    async callWhenRateLimitAllows(fn: () => Promise<Response>): Promise<types.HabiticaResponse> {
+    async callWhenRateLimitAllows(awaitable: Promise<Response>): Promise<types.HabiticaResponse> {
         // If we have remaining requests, call the function immediately
         if (this.remainingRequests > 0) {
             util.log("callWhenRateLimitAllows: Remaining requests available, making request immediately.");
-            return fn().then(this._handleResponse.bind(this));
+            return awaitable.then(this._handleResponse.bind(this));
         }
         // If we don't have remaining requests, wait until the reset time and resolve then.
         if (this.nextResetTime && this.nextResetTime > new Date()) {
@@ -140,13 +151,13 @@ export class HabiticaClient implements types.HabiticaAPI {
             return new Promise<types.HabiticaResponse>((resolve) => {
                 setTimeout(() => {
                     // Recursively call this function after waiting to ensure rate limit is respected
-                    this.callWhenRateLimitAllows(fn).then(resolve);
+                    this.callWhenRateLimitAllows(awaitable).then(resolve);
                 }, waitTime + this.settings().rateLimitBuffer);
             });
         }
-       util.log("!!! callWhenRateLimitAllows: No reset time available, making request immediately.");
+        util.log("!!! callWhenRateLimitAllows: No reset time available, making request immediately.");
         // If we don't have a reset time, just call the function (shouldn't happen, except maybe on first call)
-        return fn().then(this._handleResponse.bind(this));
+        return awaitable.then(this._handleResponse.bind(this));
     }
 
     /**
@@ -191,7 +202,7 @@ export class HabiticaClient implements types.HabiticaAPI {
         util.log(`Fetching tasks from Habitica: ${url}`);
 
         // First retrieve data, then parse response
-        return this.callWhenRateLimitAllows(() =>
+        return this.callWhenRateLimitAllows(
             fetch(url, { method: 'GET', headers })
         ).then((data: types.HabiticaResponse) => {
             // Presume failure is caught by _handleResponse; cast as appropriate type
