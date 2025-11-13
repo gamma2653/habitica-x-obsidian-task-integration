@@ -11,6 +11,7 @@ export interface HabiticaTasksSettings {
 	enablePane: boolean; // Whether to enable the Habitica pane in Obsidian
 }
 
+// TODO: Use zod to validate response data
 export type HabiticaTask = {
 	attribute: string
 	byHabitica: boolean
@@ -62,18 +63,13 @@ export type HabiticaTask = {
 	_id: string
 }
 
-export const TaskTypes = {
-	habit: 'habit',
-	daily: 'daily',
-	todo: 'todo',
-	reward: 'reward',
-	completedTodo: 'completedTodo'
-} as const;
-export type TaskType = typeof TaskTypes[keyof typeof TaskTypes];
+export const TASK_TYPES = ['habit', 'daily', 'todo', 'reward', 'completedTodo'] as const;
+// export type TaskType = typeof TaskTypes[keyof typeof TaskTypes];
+export type TaskType = typeof TASK_TYPES[number];
 export type HabiticaTaskMap = {
 	[key in TaskType]: HabiticaTask[];
 }
-export const ExcludedTaskTypes: Set<TaskType> = new Set(['completedTodo', 'reward']);
+export const EXCLUDED_TASK_TYPES: Set<TaskType> = new Set(['completedTodo', 'reward']);
 
 export type HabiticaResponse = {
 	success: boolean;
@@ -84,3 +80,25 @@ export interface HabiticaTaskRequest {
 	type?: TaskType;
 	dueDate?: Date;
 }
+
+// Event and Subscriber IDs
+export const HABITICA_API_EVENTS = ['todoUpdated', 'dailyUpdated', 'habitUpdated', 'taskUpdated'] as const;
+export const SUBSCRIBER_IDs = ['paneSync', 'noteSync'] as const;
+
+export type HabiticaApiEvent = typeof HABITICA_API_EVENTS[number];
+export type SubscriberID = typeof SUBSCRIBER_IDs[number];
+
+// Habitica API Interface
+export interface HabiticaAPI {
+	retrieveTasks(ctx?: HabiticaTaskRequest): Promise<HabiticaTask[]>;
+	retrieveAllTasks(): Promise<HabiticaTaskMap>;
+	// createTask(task: Partial<HabiticaTask>): Promise<HabiticaTask | null>;
+	subscribe(event: HabiticaApiEvent, subscriber_id: SubscriberID, listener: (tasks: HabiticaTask[]) => void): void;  // e.g., 'todoUpdated', 'dailyUpdated', etc.
+	unsubscribe(event: HabiticaApiEvent, subscriber_id: SubscriberID, listener: (tasks: HabiticaTask[]) => void): void;
+	emit(event: HabiticaApiEvent, tasks: HabiticaTask[]): void;
+}
+
+
+// export interface ContextView {
+// 	new (leaf: any, ctx: any): ContextView;
+// }

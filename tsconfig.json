@@ -15,8 +15,10 @@
       "DOM",
       "ESNext"
     ],
+    "jsx": "react-jsx"
   },
   "include": [
-    "**/*.ts"
-  ]
+    "**/*.ts",
+    "**/*.tsx"
+  ],
 }

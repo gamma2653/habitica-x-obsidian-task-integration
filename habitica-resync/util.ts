@@ -1,5 +1,4 @@
 import type { HabiticaTask, HabiticaTaskMap, HabiticaTasksSettings as HabiticaTaskSettings } from './types';
-import { TaskTypes, ExcludedTaskTypes } from './types';
 // import { version as VERSION } from './manifest.json';
 
 /**
@@ -55,6 +54,14 @@ export const log = (message: string, ...optionalParams: any[]) => {
     console.log(`[Habitica Resync v${VERSION}] ${message}`, ...optionalParams);
 }
 
+export const warn = (message: string, ...optionalParams: any[]) => {
+    console.warn(`[Habitica Resync v${VERSION}] ${message}`, ...optionalParams);
+}
+
+export const error = (message: string, ...optionalParams: any[]) => {
+    console.error(`[Habitica Resync v${VERSION}] ${message}`, ...optionalParams);
+}
+
 export const organizeHabiticaTasksByType = (tasks: HabiticaTask[]): HabiticaTaskMap => {
     const taskMap: HabiticaTaskMap = {
         habit: [],
@@ -74,7 +81,7 @@ export const organizeHabiticaTasksByType = (tasks: HabiticaTask[]): HabiticaTask
 }
 
 
-export const checklistPartForTask = (task: HabiticaTask, settings: HabiticaTaskSettings): string[] => {
+export const checklistLinesForTask = (task: HabiticaTask, settings: HabiticaTaskSettings): string[] => {
     // If checklist is invalid, return empty array
     if (!task.checklist || !Array.isArray(task.checklist) || task.checklist.length === 0) {
         return [];
@@ -136,6 +143,10 @@ const priorityToEmoji = (priority: number): string => {
     return TASK_PRIORITIES[intPriority] || '';
 };
 
+export const newSubscriberEntry = () => ({
+    paneSync: new Set<(...args: any[]) => void>(),
+    noteSync: new Set<(...args: any[]) => void>()
+});
 
 export const emojiPartForTask = (task: HabiticaTask, settings: HabiticaTaskSettings): string => {
     // First pick emoji based on task type
@@ -149,6 +160,7 @@ export const emojiPartForTask = (task: HabiticaTask, settings: HabiticaTaskSetti
  * Generates the primary markdown line for a Habitica task.
  * This line includes the completion checkbox, an emoji representing the task type, and the task text.
  * @param task The Habitica task to convert to a markdown line.
+ * @param settings Settings for formatting the task line.
  * @returns The primary markdown line for the task.
  */
 export const primaryLineForTask = (task: HabiticaTask, settings: HabiticaTaskSettings): string => {
@@ -161,8 +173,9 @@ export const primaryLineForTask = (task: HabiticaTask, settings: HabiticaTaskSet
 /**
  * Converts a Habitica task to a markdown note.
  * @param task The Habitica task to convert.
+ * @param settings Settings for formatting the task note.
  * @returns The markdown-formatted string for the task.
  */
 export const taskToNoteLines = (task: HabiticaTask, settings: HabiticaTaskSettings): string => {
-    return [primaryLineForTask(task, settings), ...checklistPartForTask(task, settings)].join('\n');
+    return [primaryLineForTask(task, settings), ...checklistLinesForTask(task, settings)].join('\n');
 }

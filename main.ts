@@ -1,11 +1,18 @@
 import type { App } from 'obsidian';
-import { Notice, Editor, Plugin, PluginSettingTab, Setting, MarkdownView, TFolder } from 'obsidian';
-import type { HabiticaTasksSettings, HabiticaTaskRequest, HabiticaTask, HabiticaResponse, HabiticaTaskMap, TaskType } from './habitica-resync/types';
-import { ExcludedTaskTypes, TaskTypes } from './habitica-resync/types';
-import { organizeHabiticaTasksByType, taskToNoteLines, log } from './habitica-resync/util';
+import { Notice, Editor, Plugin, PluginSettingTab, Setting, MarkdownView, TFolder, WorkspaceLeaf } from 'obsidian';
+
+// import type { HabiticaTasksSettings, TaskType } from './habitica-resync/types';
+import * as types from './habitica-resync/types';
+import * as mounting from './habitica-resync/react/mounting';
+import * as habiticaAPI from './habitica-resync/api';
+import * as util from './habitica-resync/util';
+// import { ExcludedTaskTypes, TaskTypes } from './habitica-resync/types';
+// import { HabiticaClient } from './habitica-resync/api';
+// import { taskToNoteLines, log, warn } from './habitica-resync/util';
+// import { VIEW_ID_TO_TYPE } from 'habitica-resync/mounting';
 
 
-const DEFAULT_SETTINGS: HabiticaTasksSettings = {
+const DEFAULT_SETTINGS: types.HabiticaTasksSettings = {
 	userId: '',
 	timeOut: 30000,
 	apiKey: '',
@@ -16,159 +23,7 @@ const DEFAULT_SETTINGS: HabiticaTasksSettings = {
 	enablePane: false
 }
 
-const HABITICA_SIDE_PLUGIN_ID = 'habitica-x-obsidian-task-integration';
 const PLUGIN_NAME = 'Habitica-Tasks Integration';
-const HABITICA_API_URL = 'https://habitica.com/api';
-const DEVELOPER_USER_ID = 'a8e40d27-c872-493f-acf2-9fe75c56ac0c'  // Itssa me, GammaThought!
-
-
-/**
- * Interfaces with the Habitica API while respecting rate limits.
- */
-class HabiticaClient {
-	plugin: HabiticaResyncPlugin;
-	remainingRequests: number = 30;
-	nextResetTime: Date | null = null;
-	constructor(plugin: HabiticaResyncPlugin) {
-		// Initialize with settings
-		this.plugin = plugin;
-
-	}
-
-	settings() {
-		return this.plugin.settings;
-	}
-
-	/**
-	 * Serves as a local router for building Habitica API URLs.
-	 * @param endpoint The API endpoint to access.
-	 * @param version The API version to use.
-	 * @param queryParams The query parameters to include in the URL.
-	 * @returns The constructed API URL.
-	 */
-	buildApiUrl(endpoint: string, version: number = 3, queryParams: Record<string, string> = {}): string {
-		const queryString = new URLSearchParams(queryParams).toString();
-		return `${HABITICA_API_URL}/v${version}/${endpoint}?${queryString}`;
-	}
-
-	_defaultHeaders() {
-		return {
-			'x-client': `${DEVELOPER_USER_ID}-${HABITICA_SIDE_PLUGIN_ID}`,
-			'x-api-user': `${this.settings().userId}`,
-			'x-api-key': `${this.settings().apiKey}`
-		};
-	}
-	_defaultJSONHeaders() {
-		return {
-			...this._defaultHeaders(),
-			'Content-Type': 'application/json'
-		};
-	}
-
-	/**
-	 * Calls the provided function when the rate limit allows it.
-	 * If there are remaining requests, it calls the function immediately.
-	 * If there are no remaining requests, it waits until the next reset time plus a buffer before calling the function.
-	 * @param fn The function to call when the rate limit allows it.
-	 * @returns A promise that resolves to the result of the function.
-	 * @throws An error if the function call fails.
-	 */
-	async callWhenRateLimitAllows(fn: () => Promise<Response>): Promise<HabiticaResponse> {
-		// If we have remaining requests, call the function immediately
-		if (this.remainingRequests > 0) {
-			log("callWhenRateLimitAllows: Remaining requests available, calling function immediately.");
-			return fn().then(this._handleResponse.bind(this));
-		}
-		// If we don't have remaining requests, wait until the reset time and resolve then.
-		if (this.nextResetTime && this.nextResetTime > new Date()) {
-			log(`callWhenRateLimitAllows: No remaining requests, waiting until reset time at ${this.nextResetTime.toISOString()} (${this.nextResetTime}).`);
-			const waitTime = this.nextResetTime.getTime() - new Date().getTime();
-			return new Promise<HabiticaResponse>((resolve) => {
-				setTimeout(() => {
-					// Recursively call this function after waiting to ensure rate limit is respected
-					this.callWhenRateLimitAllows(fn).then(resolve);
-				}, waitTime + this.settings().rateLimitBuffer);
-			});
-		}
-		log("!!! callWhenRateLimitAllows: No reset time available, calling function immediately.");
-		// If we don't have a reset time, just call the function (shouldn't happen, except maybe on first call)
-		return fn().then(this._handleResponse.bind(this));
-	}
-
-	/**
-	 * Handles the response from the Habitica API.
-	 * @param response The response from the API.
-	 * @returns A promise that resolves to the parsed HabiticaResponse.
-	 * @throws An error if the response is not ok or if the API indicates failure.
-	 */
-	async _handleResponse(response: Response): Promise<HabiticaResponse> {
-		// Check response headers for rate limiting info
-		this.remainingRequests = parseInt(response.headers.get('x-ratelimit-remaining') || this.remainingRequests?.toString() || '30');
-		this.nextResetTime = new Date(response.headers.get('x-ratelimit-reset') || this.nextResetTime?.toISOString() || new Date().toISOString());
-		log(`Rate Limit - Remaining: ${this.remainingRequests}, Next Reset Time: ${this.nextResetTime}`);
-		// Check if response is ok & successful
-		if (!response.ok) {
-			throw new Error(`HTTP error (Is Habitica API down?); status: ${response.status}, statusText: ${response.statusText}`);
-		}
-		// Sneak peek at the response JSON
-		const data = await response.json() as HabiticaResponse;
-		if (!data.success) {
-			throw new Error(`Habitica API error (Was there a Habitica API update?); response: ${JSON.stringify(data)}`);
-		}
-		return data;
-	}
-
-	/**
-	 * Retrieves tasks from Habitica API based on the provided context.
-	 * If no context is provided, retrieves all tasks.
-	 * If the request fails, notifies the user and returns an empty array.
-	 * @param ctx The context for retrieving tasks, including type and due date.
-	 * @returns A promise that resolves to an array of HabiticaTask objects.
-	 */
-	async retrieveTasks(ctx: HabiticaTaskRequest = {}): Promise<HabiticaTask[]> {
-		// Fetch
-		// Only include keys for non-null/defined parameters
-		const queryParams: Record<string, string> = {
-			...(ctx.type ? { type: ctx.type } : {}),
-			...(ctx.dueDate ? { dueDate: ctx.dueDate.toISOString() } : {})
-		};
-		const url = this.buildApiUrl('tasks/user', 3, queryParams);
-		const headers = this._defaultJSONHeaders();
-		log(`Fetching tasks from Habitica: ${url}`);
-
-		// First retrieve data, then parse response
-		return this.callWhenRateLimitAllows(() =>
-			fetch(url, { method: 'GET', headers })
-		).then((data: HabiticaResponse) => {
-			// Presume failure is caught by _handleResponse
-			return data.data as HabiticaTask[];
-		});
-	}
-
-	/**
-	 * Utility method to retrieve all tasks organized by type.
-	 * @returns A promise that resolves to a map of tasks organized by type.
-	 */
-	async retrieveAllTasks(): Promise<HabiticaTaskMap> {
-		// Retrieve all tasks of all types
-		const tasks = await this.retrieveTasks();
-		return organizeHabiticaTasksByType(tasks);
-	}
-
-	// async createTask(task: Partial<HabiticaTask>): Promise<HabiticaTask | null> {
-	// 	// Create a new task in Habitica
-	// 	const url = this.buildApiUrl('tasks/user', 3);
-	// 	const headers = this._defaultJSONHeaders();
-	// 	log(`Creating task in Habitica: ${url}`);
-
-	// 	return this.callWhenRateLimitAllows(() =>
-	// 		fetch(url, { method: 'POST', headers, body: JSON.stringify(task) })
-	// 	).then((data: HabiticaResponse) => {
-	// 		// Presume failure is caught by _handleResponse
-	// 		return data.data as HabiticaTask;
-	// 	});
-	// }
-}
 
 /**
  * Main plugin class for Habitica-Tasks Integration.
@@ -176,12 +31,37 @@ class HabiticaClient {
  * Handles plugin lifecycle, settings, and UI integration.
  */
 export default class HabiticaResyncPlugin extends Plugin {
-	settings: HabiticaTasksSettings;
-	client: HabiticaClient;
+	settings: types.HabiticaTasksSettings;
+	client: habiticaAPI.HabiticaClient;
 	functioning: boolean = true;
 	nonFunctionalReason: string = '';
 	lastFunctionalNotice: Date | null = null;
 	tasksPlugin: Plugin | null = null;
+
+	async showPane() {
+		const { workspace } = this.app;
+		const view_type = Object.keys(mounting.VIEW_ID_TO_TYPE)[0];
+		let leaf: WorkspaceLeaf | null = null;
+		const leaves = workspace.getLeavesOfType(view_type);
+
+		if (leaves.length > 0) {
+			// A leaf with our view already exists, use that
+			leaf = leaves[0];
+		} else {
+			// Our view could not be found in the workspace, create a new leaf
+			// in the right sidebar for it
+			leaf = workspace.getRightLeaf(false);
+			if (leaf) {
+				await leaf.setViewState({ type: view_type, active: true });
+			} else {
+				util.warn('Could not create or find a workspace leaf for the Habitica pane view.');
+				return;
+			}
+		}
+
+		// "Reveal" the leaf in case it is in a collapsed sidebar
+		workspace.revealLeaf(leaf);
+	}
 
 	attachRibbonButton() {
 		// This creates an icon in the left ribbon.
@@ -189,6 +69,9 @@ export default class HabiticaResyncPlugin extends Plugin {
 			// Called when the user clicks the icon.
 			new Notice(`${PLUGIN_NAME} icon clicked. Retrieving tasks...`);
 			await this.retrieveHabiticaNotes();
+			if (this.settings.enablePane) {
+				await this.showPane();
+			}
 		});
 		// Perform additional things with the ribbon
 		ribbonIconEl.addClass('habitica-task-btn');
@@ -212,10 +95,10 @@ export default class HabiticaResyncPlugin extends Plugin {
 	async retrieveHabiticaNotes() {
 		const folderPath = this.getOrCreateHabiticaFolder();
 		// Create files
-		const habiticaTasks = await this.client.retrieveAllTasks();
+		const habiticaTasks = await this.client.performWhileAllUnsubscribed('noteSync', this.client.retrieveAllTasks());
 		for (const [type_, tasks] of Object.entries(habiticaTasks)) {
 			// Skip ignored types
-			if (tasks.length === 0 || ExcludedTaskTypes.has(type_ as TaskType)) {  // Surprised TypeScript allows this cast
+			if (tasks.length === 0 || types.EXCLUDED_TASK_TYPES.has(type_ as types.TaskType)) {  // Surprised TypeScript allows this cast
 				continue;
 			}
 			const fileName = `${type_}.md`;
@@ -223,10 +106,10 @@ export default class HabiticaResyncPlugin extends Plugin {
 			const file = this.app.vault.getFileByPath(filePath);
 			if (!file) {
 				// Create new file
-				await this.app.vault.create(filePath, tasks.map(task => taskToNoteLines(task, this.settings)).join('\n\n---\n\n'));
+				await this.app.vault.create(filePath, tasks.map(task => util.taskToNoteLines(task, this.settings)).join('\n\n---\n\n'));
 			} else {
 				// Overwrite existing file
-				await this.app.vault.process(file, _ => tasks.map(task => taskToNoteLines(task, this.settings)).join('\n\n---\n\n'));
+				await this.app.vault.process(file, _ => tasks.map(task => util.taskToNoteLines(task, this.settings)).join('\n\n---\n\n'));
 			}
 		}
 	}
@@ -247,9 +130,9 @@ export default class HabiticaResyncPlugin extends Plugin {
 
 	getHabiticaFiles() {
 		const folderPath = this.getOrCreateHabiticaFolder();
-		const habiticaFiles: Record<TaskType, string> = {} as Record<TaskType, string>;
-		for (const type of Object.values(TaskTypes)) {
-			if (ExcludedTaskTypes.has(type)) {
+		const habiticaFiles: Record<types.TaskType, string> = {} as Record<types.TaskType, string>;
+		for (const type of Object.values(types.TASK_TYPES)) {
+			if (types.EXCLUDED_TASK_TYPES.has(type)) {
 				continue;
 			}
 			habiticaFiles[type] = `${folderPath}/${type}.md`;
@@ -264,7 +147,7 @@ export default class HabiticaResyncPlugin extends Plugin {
 			const file = this.app.vault.getFileByPath(filePath);
 			if (file) {
 				const content = await this.app.vault.read(file);
-				// Push content to Habitica
+				// TODO: Push content to Habitica
 			}
 		}
 	}
@@ -283,7 +166,7 @@ export default class HabiticaResyncPlugin extends Plugin {
 			id: 'sample-editor-command',
 			name: 'Sample editor command',
 			editorCallback: this.runOrNotify((editor: Editor, _view: MarkdownView) => {
-				log(editor.getSelection());
+				util.log(editor.getSelection());
 				editor.replaceSelection('Sample Editor Command');
 			})
 		});
@@ -332,7 +215,14 @@ export default class HabiticaResyncPlugin extends Plugin {
 			}
 		});
 	}
-
+	addViews() {
+		for (const [viewId, ViewType] of Object.entries(mounting.VIEW_ID_TO_TYPE)) {
+			this.registerView(
+				viewId,
+				(leaf => new ViewType(leaf, this.client))
+			);
+		}
+	}
 
 	async onload() {
 		await this.loadSettings();
@@ -340,8 +230,9 @@ export default class HabiticaResyncPlugin extends Plugin {
 		this.attachStatusBar();
 		this.attachCommands();
 		this.addSettingTab(new HabiticaResyncSettingTab(this.app, this));
+		this.addViews();
 		this.detectTasksPlugin();
-		this.client = new HabiticaClient(this);
+		this.client = new habiticaAPI.HabiticaClient(this);
 	}
 
 	onunload() {
